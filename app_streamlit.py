@@ -1,122 +1,106 @@
-import streamlit as st  # Streamlit 本身
-import requests         # 用於發送 API 請求
-import json             # 用於處理 JSON 資料 (主要是為了美化輸出，fetch_food_from_api 會用到)
-import pandas as pd # <--- 新增這一行
-# 用於處理資料框 (DataFrame)，如果需要顯示表格或進行資料處理
+# app_streamlit.py
 
-# --- 請填入您真實且有效的 Edamam API 憑證 ---
-EDAMAM_APP_ID = "d3dffabe"  # 替換成您的 App ID
-EDAMAM_APP_KEY = "84e836c03e271f07dafeb480112e9595" # 替換成您的 App Key
-# 如果您的 Edamam 設定仍然需要 Edamam-Account-User 標頭
-# USER_ID_FOR_HEADER = "mytestuser123" # 您可以取消註解並使用它
-# ------------------------------------------------
+import streamlit as st
+import io # 用於處理圖片上傳的位元組流
 
-def fetch_food_from_api(food_name_to_search): # 這是我們之前定義的函式
+# 匯入我們自己建立的 vision_api 模組
+# 假設您的 vision_api.py 檔案位於名為 'vision_module' 的資料夾中，
+# 並且 'vision_module' 資料夾與 'app_streamlit.py' 在同一層級 (都在 'project_foodie' 內)。
+# 如果您的資料夾名稱不同 (例如您之前使用的是 'Ճ<y_bin_46>python_code')，請相應修改 'vision_module'。
+try:
+    from vision_module import vision_api 
+except ImportError as e:
+    # 如果匯入失敗，很可能是檔案路徑或名稱有問題
+    st.error(f"錯誤：無法匯入 vision_api 模組: {e}。"
+             "請確認 'vision_module/vision_api.py' (或您實際的模組路徑) 檔案存在，並且資料夾結構正確。")
+    st.stop() # 停止應用程式執行，因為核心模組無法載入
+
+# 設定網頁的標題和佈局方式
+st.set_page_config(page_title="AI 食物助手 (Vision API 測試)", layout="wide")
+st.title("📸 AI 食物圖片分析助手")
+st.subheader("使用 Google Cloud Vision API")
+
+# --- 非常重要：在應用程式啟動時，呼叫一次憑證設定函式 ---
+# 這會執行 vision_api.py 中的 setup_google_credentials()，
+# 嘗試從 .streamlit/secrets.toml (本地) 或 Streamlit Cloud Secrets (部署時) 讀取金鑰內容，
+# 並設定好環境變數，以便 google-cloud-vision 套件可以找到憑證。
+if hasattr(vision_api, 'setup_google_credentials'): # 檢查函式是否存在於模組中
+    vision_api.setup_google_credentials()
+else:
+    st.error("嚴重錯誤：'setup_google_credentials' 函式在 vision_api 模組中未定義。應用程式無法繼續。")
+    st.stop() # 如果核心的憑證設定函式不存在，則停止應用程式
+# ---------------------------------------------------------------
+
+# 側邊欄的說明文字
+st.sidebar.header("使用說明")
+st.sidebar.info(
     """
-    嘗試從 Edamam API 獲取指定食物的營養資訊。
+    1.  點擊下方的「瀏覽檔案」按鈕，或直接將圖片拖放到該區域，以上傳一張包含食物的圖片。
+    2.  圖片上傳成功後，它會顯示在頁面左側。
+    3.  點擊右側的「開始分析圖片」按鈕。
+    4.  應用程式將使用 Google Cloud Vision API 來辨識圖片中的主要食物內容標籤。
     """
-    base_url = "https://api.edamam.com"
-    parser_endpoint = "/api/food-database/v2/parser"
-    request_url = f"{base_url}{parser_endpoint}?ingr={food_name_to_search}&app_id={EDAMAM_APP_ID}&app_key={EDAMAM_APP_KEY}"
+)
 
-    headers_to_send = {}
-    # # 如果您的 Edamam 設定需要 User ID Header (定義 USER_ID_FOR_HEADER 並取消下面這行的註解)
-    # if 'USER_ID_FOR_HEADER' in globals() and USER_ID_FOR_HEADER:
-    #    headers_to_send["Edamam-Account-User"] = USER_ID_FOR_HEADER
+# 在側邊欄顯示一個警告，如果憑證設定不成功
+# vision_api._google_credentials_set 是我們在 vision_api.py 中設定的全域變數，用來追蹤憑證狀態
+if hasattr(vision_api, '_google_credentials_set') and not vision_api._google_credentials_set:
+    st.sidebar.error(
+        "警告：GCP 憑證未能成功載入。圖片分析功能可能無法使用。 "
+        "請檢查您的 `.streamlit/secrets.toml` 檔案中的 'GCP_CREDENTIALS_JSON_CONTENT' 項目，"
+        "或相關的 GCP 設定與金鑰權限。",
+        icon="⚠️"
+    )
 
-    try:
-        response = None
-        if headers_to_send:
-            response = requests.get(request_url, headers=headers_to_send)
-        else:
-            response = requests.get(request_url)
+# --- 主應用程式介面 ---
+# 檔案上傳元件
+uploaded_file = st.file_uploader(
+    "1. 請上傳食物圖片進行分析:", 
+    type=["jpg", "jpeg", "png"], # 限制可上傳的檔案類型為這三種圖片格式
+    help="將圖片拖放到此處，或點擊瀏覽檔案。支援 JPG, JPEG, PNG 格式。" # 滑鼠移到上傳區域時顯示的輔助說明文字
+)
 
-        if response.status_code != 200:
-            # 在 Streamlit 中，我們可以用 st.error() 顯示錯誤訊息給開發者看，但函式本身應回傳 None
-            # st.error(f"API 錯誤：狀態碼 {response.status_code} - {response.text}") # 暫時先不在函式內用st元件
-            print(f"DEBUG: API 錯誤：狀態碼 {response.status_code} - {response.text}") # 除錯時可用 print
-            return None
+if uploaded_file is not None: # 如果使用者已成功上傳檔案
+    image_bytes = uploaded_file.getvalue() # 獲取上傳圖片的原始位元組數據
 
-        data = response.json()
+    # 使用 st.columns 將頁面分為兩欄，讓圖片和結果並排顯示，佈局更美觀
+    col1, col2 = st.columns([0.6, 0.4]) # 左欄佔 60% 寬度，右欄佔 40%
 
-        if "parsed" in data and data["parsed"]:
-            api_food_data = data["parsed"][0]["food"]
-            nutrients_from_api = api_food_data.get("nutrients", {})
-            formatted_nutrition_data = {
-                "食物名稱": api_food_data.get("label", food_name_to_search),
-                "食物ID": api_food_data.get("foodId", "N/A"),
-                "熱量": nutrients_from_api.get("ENERC_KCAL", 0.0),
-                "蛋白質": nutrients_from_api.get("PROCNT", 0.0),
-                "碳水": nutrients_from_api.get("CHOCDF", 0.0),
-                "脂肪": nutrients_from_api.get("FAT", 0.0)
-            }
-            return formatted_nutrition_data
-        else:
-            # st.warning(f"API 未能解析食物: '{food_name_to_search}'") # 暫時先不在函式內用st元件
-            print(f"DEBUG: API 未能解析食物: '{food_name_to_search}'") # 除錯時可用 print
-            return None
+    with col1: # 在左欄顯示上傳的圖片
+        st.image(image_bytes, caption="您上傳的圖片", use_column_width=True) # use_column_width=True 讓圖片寬度符合欄寬
 
-    except requests.exceptions.RequestException as e:
-        # st.error(f"呼叫 API 時發生網路或請求錯誤: {e}") # 暫時先不在函式內用st元件
-        print(f"DEBUG: 呼叫 API 時發生網路或請求錯誤: {e}") # 除錯時可用 print
-        return None
-    # ... (其他 except 區塊，為了簡潔，暫時省略 print/st.error，但函式應回傳 None) ...
-    except json.JSONDecodeError:
-        print(f"DEBUG: 無法解析 API 回傳的 JSON 資料。")
-        return None
-    except KeyError as e:
-        print(f"DEBUG: 解析 API 回應時，找不到預期的欄位(Key): {e}")
-        return None
-    except Exception as e:
-        print(f"DEBUG: 處理 API 回應時發生未知錯誤: {e}")
-        return None
+    with col2: # 在右欄顯示分析按鈕和分析結果
+        if st.button("🔍 開始分析圖片", type="primary", use_container_width=True, key="analyze_button"):
+            if image_bytes: # 再次確認圖片數據存在 (通常 uploaded_file is not None 就表示存在)
+                # 檢查 GCP 憑證是否已成功設定 (從 vision_api 模組的全域變數讀取狀態)
+                if not vision_api._google_credentials_set:
+                    st.error("無法進行分析：GCP 憑證尚未成功設定。請檢查您的 secrets.toml 設定或程式碼中的憑證處理邏輯。")
+                else:
+                    # 顯示處理中動畫 (spinner)，並呼叫 vision_api 模組中的分析函式
+                    with st.spinner("圖片分析中，過程可能會需要幾秒鐘，請稍候..."):
+                        if hasattr(vision_api, 'analyze_image_labels'): # 再次檢查函式是否存在於模組中
+                            analysis_results = vision_api.analyze_image_labels(image_bytes)
+                        else:
+                            st.error("嚴重錯誤：'analyze_image_labels' 函式在 vision_api 模組中未定義。")
+                            analysis_results = None # 設為 None 以避免後續錯誤
 
+                    st.markdown("---") # 畫一條分隔線，讓結果更清晰
+                    if analysis_results is not None: # 如果 analyze_image_labels 函式成功執行 (可能返回空列表，或有結果)
+                        if analysis_results: # 如果結果列表不是空的 (即有辨識到標籤)
+                            st.subheader("👁️ 圖片分析結果 (來自 Google Vision API):")
+                            # 迭代顯示每一個辨識到的標籤及其信賴度
+                            for description, score in analysis_results:
+                                # 之後我們會在這裡加入中文翻譯的步驟
+                                st.write(f"- **{description}** (信賴度: {score:.1%})") # .1% 表示顯示為百分比，小數點後一位
+                        else: # 結果列表是空的 (API 成功呼叫了，但沒辨識出任何它認為相關的標籤)
+                            st.info("未能從圖片中分析出任何顯著的標籤 (Vision API 返回了空的結果列表)。")
+                    # 如果 analysis_results 為 None，表示在 analyze_image_labels 函式內部發生了錯誤，
+                    # 且該函式應該已經透過 st.error 或 print (在終端機顯示) 處理了錯誤訊息的提示。
+            else:
+                # 理論上 uploaded_file is not None 時 image_bytes 就會有值, 但多一層檢查無妨
+                st.warning("圖片內容為空，請重新上傳。") 
+else: # 如果使用者還沒上傳檔案
+    st.info("請先上傳一張食物圖片，然後點擊「開始分析圖片」按鈕。")
 
-
-# --- 保留我們之前能成功運作的 Streamlit UI 測試程式碼 ---
-st.title("Streamlit 測試頁面") 
-st.write("哈囉！如果看到這行字，表示 Streamlit 基本運作正常！") 
-st.balloons()
-
-st.markdown("---") 
-st.title("簡易食物營養查詢器 (API版)") 
-
-# ↓↓↓ UI 邏輯修改開始 ↓↓↓
-with st.form(key="food_search_form"): # 建立一個表單，並給它一個唯一的 key
-    # 將文字輸入框放在表單內部
-    food_name_input = st.text_input("請輸入想查詢的食物名稱 (建議英文):", "apple") 
-    
-    # 建立一個表單提交按鈕
-    submitted = st.form_submit_button("查詢營養成分 (透過 API)") 
-
-# 當表單被提交後 (無論是點擊按鈕還是按 Enter)，submitted 會變成 True
-if submitted: # 檢查表單是否已提交
-    if food_name_input: # 確保使用者有輸入內容
-        st.write(f"正在透過 API 為 '{food_name_input}' 查詢營養資訊，請稍候...")
-        
-        nutrition_data = fetch_food_from_api(food_name_input) 
-        
-        if nutrition_data:
-            st.success("API 查詢成功！") 
-            retrieved_food_label = nutrition_data.get('食物名稱', food_name_input)
-            st.subheader(f"'{retrieved_food_label}' 的營養成分 (通常為每100克):")
-            
-            display_data_dict = {
-                "熱量 (KCAL)": nutrition_data.get("熱量", "N/A"),
-                "蛋白質 (g)": nutrition_data.get("蛋白質", "N/A"),
-                "碳水化合物 (g)": nutrition_data.get("碳水", "N/A"),
-                "脂肪 (g)": nutrition_data.get("脂肪", "N/A")
-            }
-            df_to_display = pd.DataFrame(
-                list(display_data_dict.items()), 
-                columns=["營養素", "含量"]
-            )
-            st.dataframe(df_to_display)
-        else:
-            st.error(f"無法從 API 獲取 '{food_name_input}' 的營養資訊。請檢查食物名稱 (建議使用英文) 或稍後再試。")
-    else:
-        st.warning("請先輸入食物名稱再查詢。")
-
-# st.markdown("---") # 之前的分隔線 (如果需要可以保留或調整位置)
-# st.caption("這是一個使用 Edamam API 的簡易 Streamlit 應用程式。") # 之前的 caption
-# ↑↑↑ UI 邏輯修改結束 ↑↑↑ 
+st.markdown("---") # 頁尾分隔線
+st.caption("此應用程式使用 Google Cloud Vision API 進行圖片內容分析。")
