@@ -102,65 +102,66 @@ def setup_google_credentials():
         _google_credentials_set = False # 標記為設定失敗
 
 
-def analyze_image_labels(image_content_bytes):
+# vision_module/vision_api.py
+# ... (保留檔案開頭的 import 和 setup_google_credentials 函式不變) ...
+
+# def setup_google_credentials(): ... (這部分不變)
+
+def analyze_image_objects(image_content_bytes): # <<< 函式名稱可以改為 analyze_image_objects
     """
-    使用 Google Cloud Vision API 的標籤偵測 (Label Detection) 功能來分析傳入的圖片內容。
+    使用 Google Cloud Vision API 的 Object Localization 功能來辨識圖片中的物件。
     Args:
         image_content_bytes (bytes): 圖片的原始位元組內容。
     Returns:
-        list: 一個包含 (標籤描述, 信賴度分數) 元組的列表。
-              如果在設定憑證失敗、Vision API 套件未載入，或 API 呼叫過程中發生錯誤，則返回 None。
+        list: 一個包含 (物件名稱, 信賴度分數) 元組的列表，如果出錯或未設定憑證則返回 None。
+              信賴度分數對於 object_localization 可能不直接提供，我們可以用 1.0 代表找到的物件。
+              或者，某些情況下 API 回應可能包含 score，需要檢查。
+              這裡我們簡化，只回傳物件名稱，並假設找到的都是高信賴度的。
+              或者，我們可以回傳 (物件名稱, 1.0) 以符合之前的 (description, score) 格式。
+              Object Localization 的結果主要是 name 和 bounding_poly。
+              GCP Object Localization API response (LocalizedObjectAnnotation) 包含 name, mid, score, bounding_poly.
     """
-    global _google_credentials_set # 確保我們能存取模組級別的 _google_credentials_set 變數
+    global _google_credentials_set # 確保能讀取到全域變數
 
-    if vision is None: # 檢查 from google.cloud import vision 是否成功
-        error_message = "錯誤：Google Cloud Vision API 的 Python 客戶端函式庫未能成功載入。無法分析圖片。"
-        if 'streamlit' in globals() and hasattr(st, 'error'): st.error(error_message)
-        else: print(error_message)
+    if vision is None: 
+        print("錯誤 (vision_api.py): Vision API client library 未成功載入。")
         return None
 
-    if not _google_credentials_set: # 如果憑證尚未設定成功
-        # print("DEBUG (vision_api.py): 呼叫 analyze_image_labels 時憑證未設定，嘗試再次設定。") # 除錯用
-        # 嘗試再次設定憑證。這是一個備援措施，理想情況下 setup_google_credentials() 應在 app 啟動時被呼叫一次。
+    if not _google_credentials_set:
+        # print("DEBUG (vision_api.py): 呼叫 analyze_image_objects 時憑證未設定，嘗試再次設定。")
         setup_google_credentials() 
-        if not _google_credentials_set: # 如果再次設定仍然失敗
-            warning_message = "警告：Google Cloud 憑證未能正確設定。圖片分析無法繼續。"
-            # print("DEBUG (vision_api.py): 從 analyze_image_labels 再次設定憑證失敗。") # 除錯用
-            if 'streamlit' in globals() and hasattr(st, 'warning'): st.warning(warning_message, icon="⚠️")
-            else: print(warning_message)
-            return None # 返回 None，表示無法分析
+        if not _google_credentials_set:
+            print("警告 (vision_api.py): Google Cloud 憑證未成功設定，無法進行圖片物件分析。")
+            return None
 
-    # print("DEBUG (vision_api.py): 憑證已設定，準備呼叫 Vision API。") # 除錯用
+    # print("DEBUG (vision_api.py): 憑證已設定，準備呼叫 Vision API 進行物件偵測。")
     try:
-        # 實例化 Vision API 的客戶端。它會自動使用 GOOGLE_APPLICATION_CREDENTIALS 環境變數。
         client = vision.ImageAnnotatorClient()
-        # 將圖片的位元組內容封裝成 Vision API 可辨識的 Image 物件。
         image = vision.Image(content=image_content_bytes)
 
-        # 呼叫 label_detection 方法進行標籤偵測。
-        response = client.label_detection(image=image)
+        # 執行物件偵測 (Object Localization)
+        response = client.object_localization(image=image) # <<< 改用 object_localization
 
-        # 檢查 API 的回應中是否有錯誤訊息。
         if response.error.message:
-            error_message = f"Vision API 錯誤: {response.error.message}"
-            # print(f"DEBUG (vision_api.py): Vision API 回應錯誤: {response.error.message}") # 除錯用
-            if 'streamlit' in globals() and hasattr(st, 'error'): st.error(error_message)
-            else: print(error_message)
-            return None # 返回 None 表示 API 呼叫有誤
+            print(f"錯誤 (vision_api.py): Vision API (物件偵測) 錯誤: {response.error.message}")
+            return None
 
-        # 如果沒有錯誤，從回應中提取標籤資訊。
-        extracted_labels = []
-        if response.label_annotations: # label_annotations 是一個列表，包含所有辨識出的標籤
-            for label in response.label_annotations:
-                # label.description 是標籤的文字描述 (例如 "apple", "fruit")
-                # label.score 是該標籤的信賴度分數 (0.0 到 1.0 之間)
-                extracted_labels.append((label.description, label.score))
-        # print(f"DEBUG (vision_api.py): 成功提取的標籤: {extracted_labels}") # 除錯用
-        return extracted_labels # 返回提取的標籤列表
+        extracted_objects = []
+        if response.localized_object_annotations: # <<< 結果在 localized_object_annotations
+            for localized_object in response.localized_object_annotations:
+                # localized_object 包含 name, mid, score, bounding_poly
+                # 我們主要需要 name 和 score
+                object_name = localized_object.name
+                object_score = localized_object.score # 通常 object localization 會提供 score
+                if object_name: # 確保名稱不是空的
+                    extracted_objects.append((object_name, object_score))
 
-    except Exception as e: # 捕獲在呼叫 Vision API 過程中可能發生的其他 Python 錯誤
-        error_message = f"呼叫 Vision API 時發生未預期的 Python 錯誤: {e}"
-        # print(f"DEBUG (vision_api.py): 呼叫 Vision API 時發生例外: {e}") # 除錯用
-        if 'streamlit' in globals() and hasattr(st, 'error'): st.error(error_message, icon="🔥")
-        else: print(error_message)
-        return None # 返回 None 表示發生錯誤
+        # print(f"DEBUG (vision_api.py): 成功提取的物件: {extracted_objects}")
+        return extracted_objects
+
+    except Exception as e:
+        print(f"錯誤 (vision_api.py): 呼叫 Vision API (物件偵測) 時發生 Python 錯誤: {e}")
+        return None
+
+# 舊的 analyze_image_labels 函式可以先保留，或者如果您確定不再使用標籤偵測，可以移除或註解掉。
+# def analyze_image_labels(image_content_bytes): ... (舊的函式)
